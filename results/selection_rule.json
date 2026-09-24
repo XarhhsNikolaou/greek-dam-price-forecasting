@@ -1,0 +1,26 @@
+{
+  "general_by_season": {
+    "summer": "B",
+    "rest": "B"
+  },
+  "seasons": {
+    "summer": [
+      6,
+      7,
+      8
+    ],
+    "rest": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      9,
+      10,
+      11,
+      12
+    ]
+  },
+  "chain_family": "C",
+  "chain_last_hour": 3
+}
