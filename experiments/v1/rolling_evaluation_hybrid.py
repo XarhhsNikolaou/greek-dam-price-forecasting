@@ -31,7 +31,22 @@ Rolling day-ahead αξιολόγηση σε βάθος ΟΛΟΚΛΗΡΟΥ έτο
 πλειοψηφία αλλά ΟΧΙ όλα τα spikes (στο test που κάναμε σε H1 2026, ~60%
 των spikes έπεφταν μέσα στη ζώνη). Τα υπόλοιπα spikes δεν ωφελούνται από
 το hybrid -- βλέπε breakdown στο τέλος του output (spikes εντός/εκτός ζώνης).
+
+ΝΕΟ: αποθηκεύει επίσης τα features + τις προβλέψεις σε vol2_final.csv
+(βλ. VOL2_FINAL_PATH), ίδια λογική με το rolling_evaluation_hybrid_v2.py.
+
+ΣΗΜΑΝΤΙΚΟ -- vol2_final ΣΩΡΕΥΤΙΚΟ, όχι overwrite: το vol2_final.csv είναι
+κοινό μεταξύ ΟΛΩΝ των rolling_evaluation_*.py scripts (αυτό, το
+_hybrid_v2.py, το _single_no_kurt.py). Κάθε script γράφει τις προβλέψεις
+του σε ΔΙΚΗ ΤΟΥ στήλη (εδώ: predicted_hybrid_original) και ενημερώνει/
+προσθέτει μόνο τις δικές του στήλες -- αν το αρχείο υπάρχει ήδη από
+προηγούμενο run άλλου script, ΔΕΝ το σβήνει, μόνο το επεκτείνει. Έτσι
+μετά από 2-3 runs (ένα ανά script) το vol2_final έχει τις προβλέψεις
+ΟΛΩΝ των μοντέλων μαζί, στο ίδιο αρχείο, ευθυγραμμισμένες ανά timestamp.
 """
+
+from pathlib import Path as _Path
+REPO = _Path(__file__).resolve().parents[2]  # repository root
 
 import warnings
 from pathlib import Path
@@ -46,14 +61,18 @@ warnings.simplefilter("ignore")
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATASET_PATH = Path(r"C:\Users\harry\Desktop\Projects\Price Forecasting Project\Dataset_Creation\processed\final_dataset.csv")
+DATASET_PATH = Path(str(REPO / "Dataset_Creation" / "processed" / "final_dataset.csv"))
+
+# vol2_final.csv -- όλα τα features (raw + engineered) που χρησιμοποιεί αυτό
+# το script, ΚΑΙ οι προβλέψεις του, μαζεμένα σε ένα dataset.
+VOL2_FINAL_PATH = DATASET_PATH.parent / "vol2_final.csv"
 
 EVAL_YEAR = 2025          # ποιο ημερολογιακό έτος αξιολογούμε
 EVAL_START = None         # π.χ. "2025-01-01" -- None = 1 Ιανουαρίου του EVAL_YEAR
 EVAL_END = None           # π.χ. "2025-12-31" -- None = 31 Δεκεμβρίου του EVAL_YEAR
                           # (κόβεται αυτόματα στη μέγιστη διαθέσιμη ημερομηνία)
 
-MONTHS_USED = 24          # μήνες rolling training window πριν από κάθε μέρα
+MONTHS_USED = 18           # μήνες rolling training window πριν από κάθε μέρα
 MIN_TRAIN_HOURS = 1000    # ελάχιστο πλήθος ωρών training, αλλιώς η μέρα παραλείπεται
 MAE_THRESHOLD = 14        # "αποδεκτό" όριο MAE
 
@@ -96,8 +115,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     έδωσαν το καλύτερο αποτέλεσμα σε όλα τα test windows -- γι' αυτό
     κρατιούνται όλα μαζί, ως ομάδα, όχι μεμονωμένα."""
     df = df.copy()
-    df["rolling_mean_1day"] = df["mcp_eur_per_mwh"].shift(1).rolling(24).mean()
-    df["rolling_mean_7days"] = df["mcp_eur_per_mwh"].shift(1).rolling(24 * 7).mean()
+    df["rolling_mean_1day"] = df["mcp_eur_per_mwh"].shift(24).rolling(24).mean()
+    df["rolling_mean_7days"] = df["mcp_eur_per_mwh"].shift(24).rolling(24 * 7).mean()
     df["lag_24h"] = df["mcp_eur_per_mwh"].shift(24)
     df["lag_25h"] = df["mcp_eur_per_mwh"].shift(25)
     df["lag_48h"] = df["mcp_eur_per_mwh"].shift(48)
@@ -109,9 +128,41 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     return df.dropna().reset_index(drop=True)
 
 
+def get_feature_columns(df: pd.DataFrame) -> list:
+    """Ίδια λίστα με αυτή που χρησιμοποιεί το run_rolling_evaluation_hybrid
+    εσωτερικά -- εκτεθειμένη ξεχωριστά ώστε το main να ξέρει τι να βάλει
+    στο vol2_final."""
+    return [c for c in df.columns if c not in ("timestamp", "mcp_eur_per_mwh", "net_out")]
+
+
+def merge_into_vol2_final(new_data: pd.DataFrame, path: Path) -> pd.DataFrame:
+    """Ενημερώνει/δημιουργεί το vol2_final.csv ΧΩΡΙΣ να χάνει στήλες που
+    έγραψαν εκεί προηγούμενα runs ΑΛΛΩΝ scripts (π.χ. οι προβλέψεις του
+    hybrid_v2 ή του single_no_kurt) -- το vol2_final είναι κοινό/σωρευτικό
+    ανάμεσα σε όλα τα rolling_evaluation_*.py.
+
+    new_data: πρέπει να έχει στήλη "timestamp" -- όλες οι υπόλοιπες
+    στήλες του μπαίνουν/ενημερώνονται στο αρχείο, ό,τι άλλο υπάρχει ήδη
+    εκεί (από άλλο script) παραμένει ανέπαφο."""
+    new_data = new_data.set_index("timestamp")
+    if path.exists():
+        existing = pd.read_csv(path)
+        existing["timestamp"] = pd.to_datetime(existing["timestamp"])
+        existing = existing.set_index("timestamp")
+        full_index = existing.index.union(new_data.index)
+        existing = existing.reindex(full_index)
+        new_data = new_data.reindex(full_index)
+        for col in new_data.columns:
+            existing[col] = new_data[col]
+        result = existing
+    else:
+        result = new_data
+    return result.sort_index().reset_index()
+
+
 def _resolve_eval_window(df: pd.DataFrame, eval_year: int) -> tuple[pd.Timestamp, pd.Timestamp]:
-    start = pd.Timestamp(EVAL_START) if EVAL_START else pd.Timestamp(f"{eval_year}-03-01")
-    end = pd.Timestamp(EVAL_END) if EVAL_END else pd.Timestamp(f"{eval_year}-03-31")
+    start = pd.Timestamp(EVAL_START) if EVAL_START else pd.Timestamp(f"{eval_year}-07-01")
+    end = pd.Timestamp(EVAL_END) if EVAL_END else pd.Timestamp(f"{eval_year}-08-31")
 
     max_available = df["timestamp"].max()
     if end > max_available:
@@ -122,7 +173,7 @@ def _resolve_eval_window(df: pd.DataFrame, eval_year: int) -> tuple[pd.Timestamp
 
 
 def run_rolling_evaluation_hybrid(df: pd.DataFrame, eval_year: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    feature_cols = [c for c in df.columns if c not in ("timestamp", "mcp_eur_per_mwh", "net_out")]
+    feature_cols = get_feature_columns(df)
     train_hours = MONTHS_USED * 30 * 24
 
     eval_start, eval_end = _resolve_eval_window(df, eval_year)
@@ -310,6 +361,11 @@ if __name__ == "__main__":
     print("Feature engineering...")
     df = build_features(df)
 
+    feature_cols = get_feature_columns(df)
+    # --- vol2_final base: timestamp + target + όλα τα features που
+    # χρησιμοποιεί αυτό το script (feature_cols) ---
+    vol2_final = df[["timestamp", "mcp_eur_per_mwh"] + feature_cols].copy()
+
     print(f"Rolling HYBRID evaluation για το έτος {EVAL_YEAR}...\n")
     results, hourly = run_rolling_evaluation_hybrid(df, EVAL_YEAR)
 
@@ -327,8 +383,25 @@ if __name__ == "__main__":
         hourly.to_csv(hourly_path, index=False)
         print(f"Αποθηκεύτηκαν τα ωριαία αποτελέσματα: {hourly_path}")
 
+        # --- προσθήκη των προβλέψεων στο vol2_final -- ΔΙΚΗ ΤΟΥ στήλη,
+        # ώστε να μη σβήνει τις προβλέψεις άλλων μοντέλων/scripts ---
+        preds_for_merge = hourly[["timestamp", "predicted"]].rename(
+            columns={"predicted": "predicted_hybrid_original"}
+        )
+        preds_for_merge["timestamp"] = pd.to_datetime(preds_for_merge["timestamp"])
+        vol2_final = vol2_final.merge(preds_for_merge, on="timestamp", how="left")
+
         plot_path = DATASET_PATH.parent / f"hybrid_mae_distribution_{EVAL_YEAR}.png"
         plot_mae_distribution(results, MAE_THRESHOLD, plot_path)
 
         month_plot_path = DATASET_PATH.parent / f"hybrid_actual_vs_predicted_month_{EVAL_YEAR}.png"
         plot_month_actual_vs_predicted(hourly, results, EVAL_YEAR, None, month_plot_path)
+
+    vol2_final = merge_into_vol2_final(vol2_final, VOL2_FINAL_PATH)
+    vol2_final.to_csv(VOL2_FINAL_PATH, index=False)
+    print(f"\nΑποθηκεύτηκε/ενημερώθηκε το vol2_final (σωρευτικό, ΔΕΝ σβήνει προβλέψεις "
+          f"άλλων scripts): {VOL2_FINAL_PATH}")
+    print(f"  Στήλες: {list(vol2_final.columns)}")
+    pred_cols = [c for c in vol2_final.columns if c.startswith("predicted_")]
+    for c in pred_cols:
+        print(f"  {c}: {vol2_final[c].notna().sum()} προβλέψεις")

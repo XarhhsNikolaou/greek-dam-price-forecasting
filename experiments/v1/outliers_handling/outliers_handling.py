@@ -1,3 +1,6 @@
+from pathlib import Path as _Path
+REPO = _Path(__file__).resolve().parents[3]  # repository root
+
 import pandas as pd
 import numpy as np
 import xgboost as xgb
@@ -6,7 +9,7 @@ from sklearn.metrics import mean_absolute_error
 import matplotlib.pyplot as plt
 
 # 1. Φόρτωση δεδομένων (Βάλε το path για το csv με τα 562 outliers)
-path = r'C:\Users\harry\Desktop\Price Forecasting Project\outliers.csv' # Άλλαξε το όνομα αν χρειάζεται
+path = str(REPO / "outliers.csv") # Άλλαξε το όνομα αν χρειάζεται
 df = pd.read_csv(path)
 print(df)
 df['timestamp'] = pd.to_datetime(df['timestamp'])

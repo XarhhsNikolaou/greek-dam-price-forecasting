@@ -21,6 +21,9 @@ scale παράμετρος της GPD θα εξαρτάται από features).
     ξ < 0: φραγμένη ουρά -- υπάρχει πρακτικό ανώτατο όριο
 """
 
+from pathlib import Path as _Path
+REPO = _Path(__file__).resolve().parents[2]  # repository root
+
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -32,7 +35,7 @@ from scipy import stats
 # CONFIG
 # ---------------------------------------------------------------------------
 DATASET_PATH = Path(
-    r"C:\Users\harry\Desktop\Projects\Price Forecasting Project\Dataset_Creation\processed\final_dataset.csv"
+    str(REPO / "Dataset_Creation" / "processed" / "final_dataset.csv")
 )
 UPPER_PERCENTILE = 95  # όριο u για την πάνω ουρά (top 5%)
 LOWER_PERCENTILE = 5   # όριο u για την κάτω ουρά (bottom 5%)

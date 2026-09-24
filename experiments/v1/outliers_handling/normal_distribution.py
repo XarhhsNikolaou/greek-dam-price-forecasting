@@ -1,9 +1,12 @@
+from pathlib import Path as _Path
+REPO = _Path(__file__).resolve().parents[3]  # repository root
+
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.stats as stats
 import pandas as pd
 
-base_file = r'C:\Users\harry\Desktop\Price Forecasting Project\ready_to_use.csv'
+base_file = str(REPO / "ready_to_use.csv")
 df = pd.read_csv(base_file)
 data = df['mcp_eur_per_mwh']
 # Υπολόγισε το μέσο όρο και την τυπική απόκλιση του δείγματός σου

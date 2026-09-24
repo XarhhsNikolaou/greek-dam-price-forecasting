@@ -26,6 +26,9 @@ build_dataset.py
 μόνο στο τέλος, όταν το pipeline ετοιμαστεί για GitHub.
 """
 
+from pathlib import Path as _Path
+REPO = _Path(__file__).resolve().parents[0]  # repository root
+
 import warnings
 from pathlib import Path
 
@@ -40,10 +43,10 @@ warnings.simplefilter("ignore")
 # ---------------------------------------------------------------------------
 CONFIG = {
     # Root φάκελος του project
-    "project_root": Path(r"C:\Users\harry\Desktop\Projects\Price Forecasting Project"),
+    "project_root": Path(str(REPO)),
 
     # Αρχικό, ήδη-καθαρό base dataset (2023-2025)
-    "base_file": Path(r"C:\Users\harry\Desktop\Projects\Price Forecasting Project\dam_prices_with_load_res_forecasts_clean (1).csv"),
+    "base_file": Path(str(REPO / "dam_prices_with_load_res_forecasts_clean (1).csv")),
 
     # Raw φάκελοι
     "dam_2026_dir": None,       # π.χ. project_root / "DAM 2026"

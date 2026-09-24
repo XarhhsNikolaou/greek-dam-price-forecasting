@@ -1,0 +1,7 @@
+numpy
+pandas
+xgboost
+# only for some scripts under experiments/
+scipy
+scikit-learn
+matplotlib

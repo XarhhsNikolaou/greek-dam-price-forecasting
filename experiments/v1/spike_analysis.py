@@ -21,6 +21,9 @@ actual-vs-predicted — ότι το μοντέλο αποτυγχάνει συσ
        πρόβλεψη όχι).
 """
 
+from pathlib import Path as _Path
+REPO = _Path(__file__).resolve().parents[2]  # repository root
+
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -31,7 +34,7 @@ import pandas as pd
 # CONFIG
 # ---------------------------------------------------------------------------
 HOURLY_RESULTS_PATH = Path(
-    r"C:\Users\harry\Desktop\Projects\Price Forecasting Project\Dataset_Creation\processed\rolling_evaluation_hourly_2025.csv"
+    str(REPO / "Dataset_Creation" / "processed" / "rolling_evaluation_hourly_2025.csv")
 )
 EXTREME_PERCENTILES = [90, 95]  # ελέγχουμε top 10% ΚΑΙ top 5%
 

@@ -23,9 +23,9 @@ Leakage fixes compared with the earlier scripts:
 
 Usage:
   python run_candidates.py --candidate A
-  python run_candidates.py --candidate C --data path/to/final_dataset.csv
-Run C and D after nothing else -- they are self-contained (each chain runs its
-own hours in order).
+  python run_candidates.py --candidate C --data path/to/other_dataset.csv
+The four candidates are independent and can run in parallel; C and D each run
+their own hours in order.
 """
 
 import argparse
@@ -39,7 +39,7 @@ import xgboost as xgb
 warnings.simplefilter("ignore")
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_DATA = ROOT / "data" / "processed" / "final_dataset.csv"
+DEFAULT_DATA = ROOT / "Dataset_Creation" / "processed" / "final_dataset.csv"
 RESULTS_DIR = ROOT / "results"
 
 EVAL_START = "2024-07-01"

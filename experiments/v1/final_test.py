@@ -59,7 +59,7 @@ warnings.simplefilter("ignore")
 EVAL_START = None   # π.χ. "2025-01-01" -- None = 1 Ιανουαρίου του EVAL_YEAR
 EVAL_END = None      # π.χ. "2025-12-31" -- None = 31 Δεκεμβρίου του EVAL_YEAR
 
-PEAK_HOURS = {10, 11, 12, 18, 19, 20}
+PEAK_HOURS = {10, 11, 12, 16, 17}
 MAX_THRESHOLD = 180   # €/MWh -- πάνω από αυτό, θεωρείται "πρόσφατα ακραία υψηλή" περίοδος
 MIN_THRESHOLD = 30    # €/MWh -- κάτω από αυτό, θεωρείται "πρόσφατα ακραία χαμηλή" περίοδος
 ZONE_EXTRA_FEATURES = ["is_max_24h_over", "is_max_1week_over", "is_min_24h_under", "is_min_1week_under"]
@@ -101,8 +101,8 @@ def add_zone_extra_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _resolve_eval_window(df: pd.DataFrame, eval_year: int) -> tuple[pd.Timestamp, pd.Timestamp]:
-    start = pd.Timestamp(EVAL_START) if EVAL_START else pd.Timestamp(f"{eval_year}-03-01")
-    end = pd.Timestamp(EVAL_END) if EVAL_END else pd.Timestamp(f"{eval_year}-03-31")
+    start = pd.Timestamp(EVAL_START) if EVAL_START else pd.Timestamp(f"{eval_year}-02-01")
+    end = pd.Timestamp(EVAL_END) if EVAL_END else pd.Timestamp(f"{eval_year}-02-28")
     max_available = df["timestamp"].max()
     if end > max_available:
         print(f"[Προσοχή] EVAL_END ({end.date()}) > μέγιστη διαθέσιμη ημερομηνία "

@@ -38,3 +38,6 @@ Thumbs.db
 # --- Μυστικά (αν προσθέσεις ποτέ API keys) ---
 .env
 *.key
+
+# evaluation outputs (the frozen rule and the summary are committed on purpose)
+results/*.csv

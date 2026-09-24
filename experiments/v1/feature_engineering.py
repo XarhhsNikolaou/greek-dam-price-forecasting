@@ -1,24 +1,26 @@
+from pathlib import Path as _Path
+REPO = _Path(__file__).resolve().parents[2]  # repository root
+
 import pandas as pd
 import xgboost as xgb
 from sklearn.model_selection import GridSearchCV
 import numpy as np
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 
-path = r'C:\Users\harry\Desktop\Price Forecasting Project\Dataset_Creation\ready_to_use.csv'
+path = str(REPO / "Dataset_Creation" / "processed" / "final_dataset.csv")
 df = pd.read_csv(path)
 df['timestamp'] = pd.to_datetime(df['timestamp'])
-df['hour'] = df['timestamp'].dt.hour
+# ΔΙΟΡΘΩΣΗ: το 'hour' (και τα 'month', 'day_of_week', 'is_weekend') υπάρχουν
+# ήδη έτοιμα στο final_dataset.csv (στάδιο 4 του build_dataset.py) — δεν
+# χρειάζεται να υπολογιστούν ξανά εδώ.
 
 # --- Feature Engineering ---
-df['rolling_mean_1day'] = df['mcp_eur_per_mwh'].rolling(24).mean()
-df['rolling_mean_7days'] = df['mcp_eur_per_mwh'].rolling(24*7).mean()
-# FIX: το target (lag_1h) μένει ως mcp[t]-mcp[t-1], ΑΛΛΑ τα υπόλοιπα lag_*
-# features δεν πρέπει να περιέχουν το τρέχον mcp[t] (data leakage).
-# Κάνουμε shift(1) πριν την αφαίρεση, ώστε να χρησιμοποιούν μόνο info μέχρι t-1.
-df['lag_1h'] = df['mcp_eur_per_mwh'] - df['mcp_eur_per_mwh'].shift(1)  # target, μένει ως έχει
-df['lag_24h'] = df['mcp_eur_per_mwh'].shift(1) - df['mcp_eur_per_mwh'].shift(24)
-df['lag_48'] = df['mcp_eur_per_mwh'].shift(1) - df['mcp_eur_per_mwh'].shift(48)
-df['lag_168h'] = df['mcp_eur_per_mwh'].shift(1) - df['mcp_eur_per_mwh'].shift(168)
+df['rolling_mean_1day'] = df['mcp_eur_per_mwh'].shift(24).rolling(24).mean()
+df['rolling_mean_7days'] = df['mcp_eur_per_mwh'].shift(24).rolling(24*7).mean()
+df['lag_24h'] = df['mcp_eur_per_mwh'].shift(24)
+df['lag_25h'] = df['mcp_eur_per_mwh'].shift(25)
+df['lag_48'] = df['mcp_eur_per_mwh'].shift(48)
+df['lag_168h'] = df['mcp_eur_per_mwh'].shift(168)
 df.dropna(inplace=True)
 
 # --- Split βασισμένο σε μήνες ---
@@ -34,21 +36,18 @@ offset = days_back * 24
 df_train = df.iloc[index : -(test_horizon + offset)] if offset > 0 else df.iloc[index:-test_horizon]
 df_test = df.iloc[-(test_horizon + offset) : -offset] if offset > 0 else df.iloc[-test_horizon:]
 
-# FIX: το 'lag_1h' είναι το target -> πρέπει να αφαιρεθεί και από τα X,
-# αλλιώς το μοντέλο βλέπει την ίδια την απάντηση ως feature (data leakage).
-X_train = df_train.drop(['timestamp', 'mcp_eur_per_mwh', 'lag_1h'], axis=1)
+X_train = df_train.drop(['timestamp', 'mcp_eur_per_mwh', 'net_out'], axis=1)
 y_train = df_train['mcp_eur_per_mwh']
-y_train_ = df_train['mcp_eur_per_mwh']
-X_test = df_test.drop(['timestamp', 'mcp_eur_per_mwh', 'lag_1h'], axis=1)
+X_test = df_test.drop(['timestamp', 'mcp_eur_per_mwh', 'net_out'], axis=1)
 y_test = df_test['mcp_eur_per_mwh']
 
 # --- GridSearch ---
 tscv = TimeSeriesSplit(n_splits=3)
 xgb_model = xgb.XGBRegressor(objective='reg:squarederror')
 param_grid = {
-    'max_depth': [3, 5, 7],
-    'learning_rate': [0.01, 0.05, 0.1],
-    'n_estimators': [20, 50, 70, 100, 150, 200, 250, 300],
+    'max_depth': [5],
+    'learning_rate': [0.05],
+    'n_estimators': [150],
     'subsample': [1.0]
 }
 
@@ -58,7 +57,7 @@ grid_search.fit(X_train, y_train)
 
 best_model = grid_search.best_estimator_
 print(f"Καλύτερες παράμετροι: {grid_search.best_params_}")
-# --- Πρόβλεψη & Αξιολόγηση ---
+
 y_predicted = best_model.predict(X_test)
 
 mae = abs(y_predicted - y_test.values).mean()

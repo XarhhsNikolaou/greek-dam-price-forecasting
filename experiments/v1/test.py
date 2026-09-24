@@ -1,3 +1,6 @@
+from pathlib import Path as _Path
+REPO = _Path(__file__).resolve().parents[2]  # repository root
+
 import pandas as pd
 import xgboost as xgb
 import numpy as np
@@ -5,7 +8,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 
 # 1. Φόρτωση
-path = r'C:\Users\harry\Desktop\Price Forecasting Project\Dataset_Creation\after_exports.csv'
+path = str(REPO / "Dataset_Creation" / "after_exports.csv")
 df = pd.read_csv(path)
 df['timestamp'] = pd.to_datetime(df['timestamp'])
 

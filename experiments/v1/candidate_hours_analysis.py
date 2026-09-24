@@ -17,6 +17,9 @@ dataset μαζί -- π.χ. όλοι οι Ιανουάριοι μαζί, 2023-202
 two_stage_gpd_model.py, + γραφήματα ανά μήνα για οπτικό έλεγχο.
 """
 
+from pathlib import Path as _Path
+REPO = _Path(__file__).resolve().parents[2]  # repository root
+
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -26,7 +29,7 @@ import pandas as pd
 # CONFIG
 # ---------------------------------------------------------------------------
 DATASET_PATH = Path(
-    r"C:\Users\harry\Desktop\Projects\Price Forecasting Project\Dataset_Creation\processed\final_dataset.csv"
+    str(REPO / "Dataset_Creation" / "processed" / "final_dataset.csv")
 )
 COVERAGE_TARGET = 0.85  # ποσοστό ιστορικών ακραίων που θέλουμε να καλύπτουν οι υποψήφιες ώρες
 

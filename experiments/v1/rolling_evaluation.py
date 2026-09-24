@@ -17,6 +17,9 @@ rolling_evaluation.py
 Ιανουαρίου 2025) παραλείπονται αυτόματα.
 """
 
+from pathlib import Path as _Path
+REPO = _Path(__file__).resolve().parents[2]  # repository root
+
 import warnings
 from pathlib import Path
 
@@ -30,13 +33,13 @@ warnings.simplefilter("ignore")
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATASET_PATH = Path(r"C:\Users\harry\Desktop\Projects\Price Forecasting Project\Dataset_Creation\processed\final_dataset.csv")
+DATASET_PATH = Path(str(REPO / "Dataset_Creation" / "processed" / "final_dataset.csv"))
 
-EVAL_YEAR = 2025          # ποιο ημερολογιακό έτος αξιολογούμε (άλλαξέ το αν θες)
+EVAL_YEAR = 2026          # ποιο ημερολογιακό έτος αξιολογούμε (άλλαξέ το αν θες)
 EVAL_START = None         # π.χ. "2025-01-01" -- None = 1 Ιανουαρίου του EVAL_YEAR
 EVAL_END = None           # π.χ. "2025-12-31" -- None = 31 Δεκεμβρίου του EVAL_YEAR
                           # (κόβεται αυτόματα στη μέγιστη διαθέσιμη ημερομηνία του dataset)
-MONTHS_USED = 24          # μήνες rolling training window πριν από κάθε μέρα
+MONTHS_USED = 18          # μήνες rolling training window πριν από κάθε μέρα
 MIN_TRAIN_HOURS = 1000    # ελάχιστο πλήθος ωρών training, αλλιώς η μέρα παραλείπεται
 MAE_THRESHOLD = 14        # "αποδεκτό" όριο MAE (σύμφωνα με πρακτική βιομηχανίας, ~10-14)
 PLOT_MONTH = None         # 1-12 για συγκεκριμένο μήνα, ή None για αυτόματη επιλογή
@@ -85,8 +88,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     έδωσαν το καλύτερο αποτέλεσμα σε όλα τα test windows -- γι' αυτό
     κρατιούνται όλα μαζί, ως ομάδα, όχι μεμονωμένα."""
     df = df.copy()
-    df["rolling_mean_1day"] = df["mcp_eur_per_mwh"].shift(1).rolling(24).mean()
-    df["rolling_mean_7days"] = df["mcp_eur_per_mwh"].shift(1).rolling(24 * 7).mean()
+    df["rolling_mean_1day"] = df["mcp_eur_per_mwh"].shift(24).rolling(24).mean()
+    df["rolling_mean_7days"] = df["mcp_eur_per_mwh"].shift(24).rolling(24 * 7).mean()
     df["lag_24h"] = df["mcp_eur_per_mwh"].shift(24)
     df["lag_25h"] = df["mcp_eur_per_mwh"].shift(25)
     df["lag_48h"] = df["mcp_eur_per_mwh"].shift(48)
@@ -105,8 +108,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _resolve_eval_window(df: pd.DataFrame, eval_year: int) -> tuple[pd.Timestamp, pd.Timestamp]:
-    start = pd.Timestamp(EVAL_START) if EVAL_START else pd.Timestamp(f"{eval_year}-01-01")
-    end = pd.Timestamp(EVAL_END) if EVAL_END else pd.Timestamp(f"{eval_year}-12-31")
+    start = pd.Timestamp(EVAL_START) if EVAL_START else pd.Timestamp(f"{eval_year}-10-01")
+    end = pd.Timestamp(EVAL_END) if EVAL_END else pd.Timestamp(f"{eval_year}-10-31")
 
     max_available = df["timestamp"].max()
     if end > max_available:
