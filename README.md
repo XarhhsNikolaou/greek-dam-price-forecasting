@@ -36,15 +36,18 @@ rolling 18-month window with median (quantile 0.5) XGBoost regression:
 | Cross-border flows | walk-forward **forecast** of net exports |
 | Past prices | same hour 1, 2 and 7 days earlier, 25 h earlier, 1-day and 7-day rolling means, weekly max/min |
 | Peak-hour model only | skewness and kurtosis of prices over *D−1* and the previous week |
-| Early-hour chain only | previous 1–2 hours' price (published *D−1* prices or the chain's own predictions), planned outages delayed 36 h |
+| Early-hour chain only | previous 1–2 hours' price (published *D−1* prices or the chain's own predictions), unavailable capacity from all outages (planned and forced), each visible only 36 h after it starts |
 
 ### Leakage decisions
 
 - **Realized cross-border flows are excluded.** ENTSO-E's physical flows are
   metered and published after the fact. A walk-forward forecast of net exports
   (each block predicted only from earlier blocks) is used instead.
-- **Only planned outages are used, delayed 36 hours**, so no outage that starts
-  after the forecast time is visible to any hour of day *D*.
+- **Outages: all of them, delayed 36 hours.** The source files record when
+  an outage started, not when it was announced, so each outage (planned or
+  forced) only becomes visible to the model 36 hours after its start. Nothing
+  that starts after the forecast time is visible to any hour of day *D*; the
+  cost is that the first day and a half of every outage is never seen.
 - **Model selection never touches the test year** (next section).
 
 ## Evaluation protocol
@@ -82,6 +85,37 @@ The selection year had far more volatile prices (July 2024 standard deviation
 | General + peak model | 04–23 | 17.09 |
 
 By month, errors range from 12.1 (August 2025) to 19.8 (October 2025).
+
+## What drives the forecast
+
+How much do market fundamentals add on top of past prices? `feature_influence.py`
+splits the features into three groups and measures each one on the test year,
+using the general model (hours 04–23) retrained every quarter. That is lighter
+than the daily retraining above, so the baseline MAE is higher (18.09).
+
+| Group | Built-in importance (gain) | MAE rise when scrambled | MAE without the group (retrained) | Error reduction from adding the group |
+|---|---|---|---|---|
+| Fundamentals (load, RES, net load, gas, carbon, hydro, flows) | 43% | +17.32 | 20.55 (+2.46) | **12%** |
+| Price history (lags, rolling mean/max/min) | 54% | +12.94 | 22.01 (+3.92) | 18% |
+| Calendar | 3% | +0.60 | 18.55 (+0.46) | 2% |
+
+- **Adding the fundamentals to a model that already sees past prices cuts
+  its error by 12%** (20.55 → 18.09 €/MWh). Yesterday's prices already carry
+  yesterday's fundamentals; what the fundamentals add is tomorrow's specific
+  demand and renewable output.
+- **The trained model relies on the fundamentals as heavily as on price
+  history**: scrambling them raises MAE by 17 €/MWh. Most of that is one
+  feature, **net load** (demand − renewables + forecast net exports), at
+  +11.4 on its own: the thermal generation the system needs is what sets the
+  marginal price.
+- **Gas moves the forecast a little (+0.3), carbon not measurably.** Both
+  change slowly relative to an 18-month training window, and their effect
+  largely overlaps with the price level itself.
+- The three measures disagree on purpose: built-in importance shows what the
+  model used during training, scrambling shows what it relies on, and
+  retraining without a group shows what information only that group has.
+
+Full output: `results/feature_influence.md`.
 
 ## Project history
 
@@ -122,9 +156,11 @@ build_dataset_complete.py   data pipeline: raw files -> Dataset_Creation/process
 run_candidates.py           daily walk-forward run of one candidate model family
 select_rule.py              chooses the combination rule on the selection year only
 evaluate_test.py            applies the frozen rule to the test year
+feature_influence.py        contribution of fundamentals vs price history vs calendar
 results/
   selection_rule.json       the frozen rule (committed before the test year was scored)
   test_year_summary.txt     output of evaluate_test.py
+  feature_influence.md      output of feature_influence.py
 experiments/
   v1/                       first rolling models, spike / extreme-value (GPD) experiments,
                             classifier and hour-bucket attempts, early outlier handling
@@ -152,6 +188,9 @@ python run_candidates.py --candidate D
 # 3. choose the rule (selection year only), then score it on the test year
 python select_rule.py
 python evaluate_test.py
+
+# optional: what drives the forecast (~2-5 min)
+python feature_influence.py
 ```
 
 Each candidate takes roughly 30-60 minutes on a laptop (daily retraining over
@@ -161,6 +200,14 @@ values, so rerun results can differ from the committed ones in the decimals.
 
 ## Limitations
 
+- **Flow forecast lags (fixed after the results were produced).** The flow
+  forecast originally used realized flows from 24 hours earlier, but at the
+  ~12:00 forecast time the previous afternoon's and evening's flows are not
+  yet published. `build_dataset_complete.py` now uses flows at least 48 hours
+  old. The published results were produced with the earlier version; on the
+  general model the fix changes test-year MAE from 18.09 to 17.92 €/MWh, so
+  the leak gave no advantage and the reported numbers are not flattered by
+  it.
 - **One selection year.** The combination rule rests on a single year, which
   gives one sample of each season. That is why seasonal switching required a
   day-level win rate, not just a lower average.

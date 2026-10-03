@@ -1,33 +1,29 @@
 """
-build_dataset.py
-=================
-Ενιαίο script που χτίζει το dataset για την πρόβλεψη τιμών DAM, βήμα-βήμα.
+build_dataset_complete.py
+=========================
+Builds the dataset for Greek day-ahead (DAM) price forecasting, stage by stage.
 
-Κάθε στάδιο (stage) παίρνει ως input το αρχείο του προηγούμενου σταδίου και
-γράφει ΝΕΟ αρχείο (ποτέ δεν κάνει overwrite στο input του) — έτσι όλα τα
-ενδιάμεσα στάδια παραμένουν διαθέσιμα, τόσο για reproducibility όσο και για
-να φαίνεται η εξέλιξη του dataset (π.χ. πώς άλλαζε το MAE του μοντέλου
-καθώς προσθέτονταν νέα features).
+Each stage takes the previous stage's output and writes a NEW file (never
+overwriting its input), so every intermediate stage stays available for
+inspection and reproducibility.
 
-Στάδια:
-    01_base                  -> το αρχικό dataset (2023-2025), όπως είναι
-    02_with_2026_prices      -> + DAM 2026, + ΑΔΜΗΕ Load/RES 2026
-    03_with_fuel_carbon      -> + NGAS price, + carbon price
+Stages:
+    01_base                  -> base dataset (2023-2025) as provided
+    02_with_2026_prices      -> + DAM 2026 prices (HEnEx), + ADMIE load/RES forecasts 2026
+    03_with_fuel_carbon      -> + natural gas price, + EUA carbon price
     04_with_calendar         -> + hour, month, day_of_week, is_weekend
-    05_with_flows            -> + net_out (cross-border flows) — ΜΟΝΟ ως raw/reference,
-                                 όχι ακόμα ασφαλές ως model feature (βλ. στάδιο 8)
-    06_with_outages          -> + unit outages/unavailability
-    07_with_hydro            -> + στάθμη ταμιευτήρων υδροηλεκτρικών (ENTSO-E, εβδομαδιαία)
-    08_with_net_out_forecast -> + net_out_forecast: μια ΠΡΟΒΛΕΨΗ του net_out (όχι η
-                                 πραγματική τιμή) — αυτό ΕΙΝΑΙ ασφαλές ως model feature
+    05_with_flows            -> + net_out (realized cross-border flows) -- kept only as
+                                raw/reference data, NOT safe as a model feature (stage 8)
+    06_with_outages          -> + unit outages / unavailability, with a visibility lag
+    07_with_hydro            -> + hydro reservoir level (ENTSO-E, weekly, previous week)
+    08_with_net_out_forecast -> + net_out_forecast: a walk-forward FORECAST of net_out
+                                (not the realized value) -- safe as a model feature
 
-Σημείωση: τα paths παρακάτω είναι ακόμα absolute/hardcoded — αυτό είναι
-εντάξει προς το παρόν, όσο δουλεύουμε τοπικά. Θα γίνουν relative/config
-μόνο στο τέλος, όταν το pipeline ετοιμαστεί για GitHub.
+All timestamps are hourly. Paths are relative to this file (raw data in
+"Raw Data/", outputs in "Dataset_Creation/processed/").
+
+Usage:  python build_dataset_complete.py
 """
-
-from pathlib import Path as _Path
-REPO = _Path(__file__).resolve().parents[0]  # repository root
 
 import warnings
 from pathlib import Path
@@ -39,45 +35,48 @@ warnings.simplefilter("ignore")
 
 
 # ---------------------------------------------------------------------------
-# CONFIG — άλλαξε ΜΟΝΟ αυτό το κομμάτι για να ταιριάζει με τους φακέλους σου
+# CONFIG
 # ---------------------------------------------------------------------------
+REPO = Path(__file__).resolve().parent
+
 CONFIG = {
-    # Root φάκελος του project
-    "project_root": Path(str(REPO)),
+    "project_root": REPO,
 
-    # Αρχικό, ήδη-καθαρό base dataset (2023-2025)
-    "base_file": Path(str(REPO / "dam_prices_with_load_res_forecasts_clean (1).csv")),
+    # Base dataset (2023-2025): DAM prices with load/RES forecasts, already cleaned
+    "base_file": REPO / "dam_prices_with_load_res_forecasts_clean (1).csv",
 
-    # Raw φάκελοι
-    "dam_2026_dir": None,       # π.χ. project_root / "DAM 2026"
-    "admie_dir": None,          # π.χ. project_root / "ΑΔΜΗΕ_Folder"
-    "ngas_dir": None,           # π.χ. project_root / "Τιμές Καυσίμων"
-    "carbon_file": None,        # π.χ. project_root / "Carbon Emissions Futures Historical Data.csv"
-    "cross_border_dir": None,   # π.χ. project_root / "Raw Data" / "Cross_Border_Flows"
-    "outages_dir": None,        # θα οριστεί όταν έχεις όλα τα raw αρχεία
-    "hydro_dir": None,          # π.χ. project_root / "Raw Data" / "Hydro_Reservoirs"
+    # Raw data folders (None = default location under "Raw Data/", set below).
+    # Two folder names are in Greek, as downloaded: "ΑΔΜΗΕ_Folder" (ADMIE)
+    # and "Τιμές Καυσίμων" ("fuel prices").
+    "dam_2026_dir": None,
+    "admie_dir": None,
+    "ngas_dir": None,
+    "carbon_file": None,
+    "cross_border_dir": None,
+    "outages_dir": None,
+    "hydro_dir": None,
 
-    # Φάκελος όπου γράφονται τα ενδιάμεσα/τελικά processed αρχεία
-    "processed_dir": None,      # π.χ. project_root / "Dataset_Creation" / "processed"
+    # Where the intermediate and final processed files are written
+    "processed_dir": None,
 
-    # Flags
-    "run_outages_stage": True,  # άλλαξέ το σε True όταν είναι έτοιμο το στάδιο outages
+    "run_outages_stage": True,
 
-    # 1-day (24ω) καθυστέρηση ορατότητας για ΟΛΑ τα outages (planned + forced).
-    # Λόγος: το raw αρχείο δεν έχει πεδίο "πότε δημοσιεύτηκε" η εγγραφή, μόνο
-    # την πραγματική περίοδο του outage. Για forced (failure) outages αυτό θα
-    # ήταν leakage αν χρησιμοποιούνταν ως έχει. Λύση: κάθε outage γίνεται
-    # ορατό στο feature μόνο 24 ώρες μετά την καταγεγραμμένη έναρξή του.
+    # Outage visibility lag. The raw unavailability files have no "published
+    # at" field, only the outage period itself. Using forced outages (failures)
+    # from their start time would leak information a day-ahead forecaster did
+    # not have, so every outage only becomes visible this many hours after its
+    # recorded start. (The forecasting scripts add a further 12 h, for 36 h in
+    # total, so that nothing starting after the ~12:00 D-1 forecast time is
+    # visible to any hour of day D.)
     "outage_visibility_lag_hours": 24,
 
-    # Πλήθος blocks για το blocked walk-forward OOF forecasting του net_out
-    # (στάδιο 8) — περισσότερα blocks = πιο ρεαλιστική προσομοίωση rolling
-    # retraining, αλλά πιο αργό. ~1 block/μήνα είναι καλή ισορροπία.
+    # Number of blocks for the blocked walk-forward forecast of net_out
+    # (stage 8). More blocks = closer to daily retraining, but slower.
+    # ~1 block per month is a good balance.
     "net_out_forecast_n_blocks": 40,
 }
 
-# Συμπλήρωση default τιμών με βάση το project_root, όπου δεν έχουν οριστεί ρητά.
-# Όλοι οι raw φάκελοι βρίσκονται μέσα σε project_root / "Raw Data" / ...
+# Fill in default locations for anything not set explicitly above.
 _root = CONFIG["project_root"]
 _raw = _root / "Raw Data"
 CONFIG["dam_2026_dir"] = CONFIG["dam_2026_dir"] or (_raw / "DAM 2026")
@@ -93,38 +92,35 @@ CONFIG["processed_dir"].mkdir(parents=True, exist_ok=True)
 
 
 def _stage_path(stage_name: str) -> Path:
-    """Βοηθητική: γυρνάει το path για ένα ενδιάμεσο αρχείο σταδίου."""
+    """Path of an intermediate stage file."""
     return CONFIG["processed_dir"] / f"{stage_name}.csv"
 
 
 # ---------------------------------------------------------------------------
-# Στάδιο 1 — Base dataset
+# Stage 1 — Base dataset
 # ---------------------------------------------------------------------------
 def load_base() -> pd.DataFrame:
-    print("[1/8] Φόρτωση base dataset (2023-2025)...")
+    print("[1/8] Loading base dataset (2023-2025)...")
     df = pd.read_csv(CONFIG["base_file"])
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     df = df.sort_values("timestamp").reset_index(drop=True)
 
     out_path = _stage_path("01_base")
     df.to_csv(out_path, index=False)
-    print(f"    -> {out_path}  ({len(df)} γραμμές)")
+    print(f"    -> {out_path}  ({len(df)} rows)")
     return df
 
 
 # ---------------------------------------------------------------------------
-# Στάδιο 2 — DAM 2026 + ΑΔΜΗΕ Load/RES
+# Stage 2 — DAM 2026 prices + ADMIE load/RES forecasts
 # ---------------------------------------------------------------------------
 def _process_admie_file(file_path: Path, type_name: str) -> pd.Series:
     """
-    Ανάγνωση αρχείου ΑΔΜΗΕ (15λεπτα) και μετατροπή σε ωριαία σειρά.
+    Read one ADMIE file (15-minute values) and convert it to an hourly series.
 
-    ΣΗΜΕΙΩΣΗ / ΓΝΩΣΤΟΣ ΠΕΡΙΟΡΙΣΜΟΣ:
-    Η ανάγνωση εδώ είναι position-based (στήλη 3 = ημερομηνία, στήλες 4-99 =
-    96 τιμές 15λέπτου). Αυτό δουλεύει με τη σημερινή μορφή αρχείων ΑΔΜΗΕ, αλλά
-    θα σπάσει σιωπηλά αν αλλάξει η μορφή του αρχείου. Το κρατάμε ως έχει προς
-    το παρόν (δεν έχουμε δει εναλλακτική/πιο σταθερή μορφή raw αρχείου), αλλά
-    αξίζει επανεξέταση αν αλλάξουν ποτέ τα raw αρχεία ΑΔΜΗΕ.
+    Known limitation: parsing is position-based (column 3 = date, columns
+    4-99 = the 96 quarter-hour values). This matches the current ADMIE file
+    layout but would break silently if the layout changed.
     """
     try:
         raw = pd.read_excel(file_path, header=None)
@@ -137,17 +133,17 @@ def _process_admie_file(file_path: Path, type_name: str) -> pd.Series:
                 series = pd.Series(values, index=time_index, name=type_name)
                 return series.resample("h").mean()
     except Exception as e:
-        print(f"    !! Σφάλμα στο αρχείο {file_path.name}: {e}")
+        print(f"    !! Error in file {file_path.name}: {e}")
     return pd.Series(dtype=float, name=type_name)
 
 
 def add_dam_2026(df: pd.DataFrame) -> pd.DataFrame:
-    print("[2/8] Ενσωμάτωση DAM 2026 + ΑΔΜΗΕ Load/RES...")
+    print("[2/8] Adding DAM 2026 prices + ADMIE load/RES...")
     df = df.copy()
 
-    # --- DAM 2026 τιμές ---
-    # Φιλτράρισμα βάσει ονόματος ("*DAM*"), όχι μόνο κατάληξης — έτσι δεν
-    # σκάει αν τυχόν βρεθούν και Load/RES αρχεία στον ίδιο φάκελο.
+    # --- DAM 2026 prices ---
+    # Filter on the name ("*DAM*"), not only the extension, so that any
+    # load/RES files in the same folder are not read as price files.
     dam_files = [f for f in CONFIG["dam_2026_dir"].rglob("*.xlsx") if "DAM" in f.name.upper()] if CONFIG["dam_2026_dir"].exists() else []
     if dam_files:
         df_dam = pd.concat(
@@ -161,11 +157,11 @@ def add_dam_2026(df: pd.DataFrame) -> pd.DataFrame:
         df["mcp_eur_per_mwh"] = df["mcp_eur_per_mwh"].combine_first(df["MCP"])
         df = df.drop(columns=["MCP"])
         df = df.sort_values("timestamp").reset_index(drop=True)
-        print(f"    DAM 2026: {len(dam_files)} αρχεία ενσωματώθηκαν.")
+        print(f"    DAM 2026: {len(dam_files)} files added.")
     else:
-        print("    DAM 2026: δεν βρέθηκαν αρχεία, παραλείπεται.")
+        print("    DAM 2026: no files found, skipped.")
 
-    # --- ΑΔΜΗΕ Load & RES ---
+    # --- ADMIE load & RES forecasts ---
     admie_dir = CONFIG["admie_dir"]
     if admie_dir.exists():
         load_files = [f for f in admie_dir.rglob("*Load*") if f.is_file() and not f.name.startswith("~")]
@@ -186,21 +182,21 @@ def add_dam_2026(df: pd.DataFrame) -> pd.DataFrame:
                 df = df.drop(columns=["res"])
 
             df["net_load_proxy_mw"] = df["load_forecast_mw"] - df["res_forecast_mw"]
-            print(f"    ΑΔΜΗΕ: {len(load_files)} load + {len(res_files)} RES αρχεία ενσωματώθηκαν.")
+            print(f"    ADMIE: {len(load_files)} load + {len(res_files)} RES files added.")
     else:
-        print("    ΑΔΜΗΕ: ο φάκελος δεν βρέθηκε, παραλείπεται.")
+        print("    ADMIE: folder not found, skipped.")
 
     out_path = _stage_path("02_with_2026_prices")
     df.to_csv(out_path, index=False)
-    print(f"    -> {out_path}  ({len(df)} γραμμές)")
+    print(f"    -> {out_path}  ({len(df)} rows)")
     return df
 
 
 # ---------------------------------------------------------------------------
-# Στάδιο 3 — Φυσικό αέριο (NGAS) + Ρύποι (carbon)
+# Stage 3 — Natural gas (NGAS) + carbon (EUA)
 # ---------------------------------------------------------------------------
 def add_fuel_and_carbon(df: pd.DataFrame) -> pd.DataFrame:
-    print("[3/8] Ενσωμάτωση τιμών φυσικού αερίου (NGAS) + ρύπων (carbon)...")
+    print("[3/8] Adding natural gas (NGAS) and carbon prices...")
     df = df.copy()
     df["_date"] = df["timestamp"].dt.normalize()
 
@@ -221,9 +217,9 @@ def add_fuel_and_carbon(df: pd.DataFrame) -> pd.DataFrame:
             df = df.drop(columns=["Closing Price"])
         else:
             df = df.rename(columns={"Closing Price": "NGAS_Price"})
-        print(f"    NGAS: {len(ngas_files)} αρχεία ενσωματώθηκαν.")
+        print(f"    NGAS: {len(ngas_files)} files added.")
     else:
-        print("    NGAS: δεν βρέθηκαν αρχεία, παραλείπεται.")
+        print("    NGAS: no files found, skipped.")
 
     # --- Carbon (CO2) ---
     carbon_file = CONFIG["carbon_file"]
@@ -244,45 +240,45 @@ def add_fuel_and_carbon(df: pd.DataFrame) -> pd.DataFrame:
 
         df = pd.merge(df, df_co2, on="_date", how="left")
         df = df.sort_values("timestamp")
-        # Forward/backward fill μόνο για μέρες χωρίς trading (π.χ. Σαββατοκύριακα)
+        # Forward/backward fill only for non-trading days (e.g. weekends)
         df["carbon_price_eur"] = df["carbon_price_eur"].ffill().bfill()
-        print("    Carbon: ενσωματώθηκε.")
+        print("    Carbon: added.")
     else:
-        print("    Carbon: το αρχείο δεν βρέθηκε, παραλείπεται.")
+        print("    Carbon: file not found, skipped.")
 
     df = df.drop(columns=["_date"]).sort_values("timestamp").reset_index(drop=True)
 
     out_path = _stage_path("03_with_fuel_carbon")
     df.to_csv(out_path, index=False)
-    print(f"    -> {out_path}  ({len(df)} γραμμές)")
+    print(f"    -> {out_path}  ({len(df)} rows)")
     return df
 
 
 # ---------------------------------------------------------------------------
-# Στάδιο 4 — Calendar features (σωστά υπολογισμένα από το timestamp)
+# Stage 4 — Calendar features (computed from the timestamp)
 # ---------------------------------------------------------------------------
 def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
-    print("[4/8] Προσθήκη calendar features (hour, month, day_of_week, is_weekend)...")
+    print("[4/8] Adding calendar features (hour, month, day_of_week, is_weekend)...")
     df = df.copy()
 
     df["hour"] = df["timestamp"].dt.hour
     df["month"] = df["timestamp"].dt.month
-    df["day_of_week"] = df["timestamp"].dt.dayofweek  # 0=Δευτέρα, 6=Κυριακή
-    # ΔΙΟΡΘΩΣΗ: υπολογίζεται απευθείας από το timestamp — ΟΧΙ θέση-βασισμένο
-    # join με ξεχωριστό αρχείο, όπως γινόταν πριν (ρίσκο μετατόπισης γραμμών).
+    df["day_of_week"] = df["timestamp"].dt.dayofweek  # 0 = Monday, 6 = Sunday
+    # Computed directly from the timestamp, not joined by position from a
+    # separate file as in an earlier version (risk of shifted rows).
     df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
 
     out_path = _stage_path("04_with_calendar")
     df.to_csv(out_path, index=False)
-    print(f"    -> {out_path}  ({len(df)} γραμμές)")
+    print(f"    -> {out_path}  ({len(df)} rows)")
     return df
 
 
 # ---------------------------------------------------------------------------
-# Στάδιο 5 — Cross-border flows (net_out ΠΑΡΑΜΕΝΕΙ ως feature)
+# Stage 5 — Cross-border flows (realized net_out, reference only)
 # ---------------------------------------------------------------------------
 def add_cross_border_flows(df: pd.DataFrame) -> pd.DataFrame:
-    print("[5/8] Ενσωμάτωση cross-border flows (net_out)...")
+    print("[5/8] Adding cross-border flows (net_out)...")
     df = df.copy()
 
     cb_dir = CONFIG["cross_border_dir"]
@@ -292,35 +288,28 @@ def add_cross_border_flows(df: pd.DataFrame) -> pd.DataFrame:
         frames = []
         for f in cb_files:
             cb = pd.read_csv(f, low_memory=False)
-            # ΔΙΟΡΘΩΣΗ (σημαντική): η στήλη "timestamp" σε αυτά τα raw αρχεία
-            # είναι ΧΑΛΑΣΜΕΝΗ — δεν αντιπροσωπεύει τον πραγματικό χρόνο
-            # παράδοσης (αυξάνεται ανά ΓΡΑΜΜΗ του αρχείου, όχι ανά πραγματική
-            # ώρα, πιθανό τεχνούργημα από "τράβηγμα" τύπου σε Excel). Η
-            # ΣΩΣΤΗ στήλη είναι το "MTU" (Market Time Unit), το πραγματικό
-            # διάστημα παράδοσης — επιβεβαιώθηκε ρητά ότι είναι σε CET/CEST
-            # (το ίδιο το αρχείο το γράφει: π.χ. γύρω από αλλαγή ώρας βλέπουμε
-            # "...01:00:00 (CET) - ...03:00:00 (CEST)").
+            # The "timestamp" column in these raw files is broken: it advances
+            # per ROW of the file, not per real hour (likely an Excel fill-down
+            # artefact). The correct time is "MTU" (Market Time Unit), the
+            # actual delivery interval, which the file itself marks as CET/CEST
+            # around clock changes (e.g. "...01:00:00 (CET) - ...03:00:00 (CEST)").
             #
-            # ΔΕΝ εφαρμόζουμε κανένα time-shift εδώ: επιβεβαιώθηκε ότι EnEx
-            # (DAM), ΑΔΜΗΕ (Load/RES) ΚΑΙ ENTSO-E (cross-border) χρησιμοποιούν
-            # όλα CET/CEST — άρα είναι ήδη συνεπή μεταξύ τους χωρίς μετατόπιση.
+            # No time shift is applied: HEnEx (DAM), ADMIE (load/RES) and
+            # ENTSO-E (flows) all use CET/CEST, so they are already aligned.
             mtu_start_str = cb["MTU"].str.split(" - ").str[0]
-            # Αφαίρεση τυχόν επισήμανσης "(CET)"/"(CEST)" που εμφανίζεται
-            # ρητά μόνο στις γραμμές γύρω από αλλαγή ώρας.
+            # Strip the "(CET)"/"(CEST)" markers that appear only around
+            # clock changes.
             mtu_start_str = mtu_start_str.str.replace(r"\s*\((CET|CEST)\)", "", regex=True)
             cb["timestamp"] = pd.to_datetime(mtu_start_str, dayfirst=True)
 
-            # ΔΙΟΡΘΩΣΗ (σημαντική, 2ο επίπεδο): ούτε η προϋπολογισμένη στήλη
-            # "net_out" ΟΥΤΕ οι wide-format στήλες ροών (π.χ. "Greece -
-            # Albania") καλύπτουν παρά μόνο τις πρώτες ~5 εβδομάδες του
-            # έτους — και οι δύο είναι σχεδόν άδειες μετά από αυτό. Η στήλη
-            # που ΕΙΝΑΙ πλήρης σε όλο το έτος (επιβεβαιώθηκε: 87.588/87.600
-            # γραμμές) είναι η "Physical Flow (MW)" σε long-format (μία
-            # γραμμή ανά ζεύγος Out Area/In Area). Υπολογίζουμε το net_out
-            # ΕΜΕΙΣ από αυτήν: άθροισμα εξαγωγών (Out Area == Greece) μείον
-            # άθροισμα εισαγωγών (In Area == Greece) — επιβεβαιωμένο ότι
-            # ταιριάζει ακριβώς με τις λίγες υπάρχουσες τιμές του πρωτότυπου
-            # net_out (π.χ. 01/01/2023 00:00 -> -1993 και στα δύο).
+            # Neither the precomputed "net_out" column nor the wide-format
+            # per-border columns (e.g. "Greece - Albania") cover more than the
+            # first ~5 weeks of each year. The column that IS complete
+            # (87,588 of 87,600 rows) is "Physical Flow (MW)" in long format,
+            # one row per (Out Area, In Area) pair. net_out is computed from
+            # it: total exports (Out Area == Greece) minus total imports
+            # (In Area == Greece). Checked to match the few existing values of
+            # the original net_out exactly (e.g. 01/01/2023 00:00 -> -1993).
             cb["Physical Flow (MW)"] = pd.to_numeric(
                 cb["Physical Flow (MW)"].astype(str).str.replace(",", "", regex=False).str.strip(),
                 errors="coerce",
@@ -336,33 +325,30 @@ def add_cross_border_flows(df: pd.DataFrame) -> pd.DataFrame:
 
         df = pd.merge(df, net_out, on="timestamp", how="left")
 
-        # ΔΙΟΡΘΩΣΗ: πριν, το net_out χρησιμοποιούνταν μόνο για dropna και μετά
-        # πετιόταν — δεν έμπαινε ποτέ ως feature στο μοντέλο. Τώρα παραμένει.
-        # Για τις ώρες χωρίς διαθέσιμο flow data, γεμίζουμε με 0 (παραδοχή:
-        # "χωρίς καταγεγραμμένη ροή" -> ουδέτερη τιμή). ΑΞΙΖΕΙ ΕΠΙΒΕΒΑΙΩΣΗ:
-        # αν το 0 είναι η κατάλληλη default τιμή για το δικό σου use case, ή
-        # προτιμάς interpolation/ffill.
+        # Realized flows are published after delivery, so net_out is kept
+        # only as the target of the stage-8 forecast, never as a model
+        # feature. Hours without flow data are filled with 0 (no recorded
+        # flow = neutral value).
         missing_before = df["net_out"].isna().sum()
         df["net_out"] = df["net_out"].fillna(0.0)
-        print(f"    net_out: {len(cb_files)} αρχεία, {missing_before} ώρες συμπληρώθηκαν με 0.")
+        print(f"    net_out: {len(cb_files)} files, {missing_before} hours filled with 0.")
     else:
-        print("    Cross-border flows: δεν βρέθηκαν αρχεία, παραλείπεται (net_out δεν προστίθεται).")
+        print("    Cross-border flows: no files found, skipped (net_out not added).")
 
     out_path = _stage_path("05_with_flows")
     df.to_csv(out_path, index=False)
-    print(f"    -> {out_path}  ({len(df)} γραμμές)")
+    print(f"    -> {out_path}  ({len(df)} rows)")
     return df
 
 
 # ---------------------------------------------------------------------------
-# Στάδιο 6 — Unit outages / unavailability
+# Stage 6 — Unit outages / unavailability
 # ---------------------------------------------------------------------------
 def _load_outage_files(outages_dir: Path) -> pd.DataFrame:
     """
-    Διαβάζει ΟΛΑ τα raw αρχεία unavailability (και οι δύο ονοματολογίες:
-    'UNAVAILABILITY_Nth_...' και 'UNAVAILABILITY_OF_PRODUCTION_...') και τα
-    ενώνει σε ένα ενιαίο DataFrame. Και τα δύο "στυλ" αρχείων έχουν
-    πανομοιότυπη δομή στηλών (επιβεβαιώθηκε στα δεδομένα).
+    Read ALL raw unavailability files (both naming styles,
+    'UNAVAILABILITY_Nth_...' and 'UNAVAILABILITY_OF_PRODUCTION_...', which
+    have identical columns) into one DataFrame.
     """
     files = sorted(outages_dir.rglob("UNAVAILABILITY*.csv"))
     if not files:
@@ -372,91 +358,81 @@ def _load_outage_files(outages_dir: Path) -> pd.DataFrame:
 
 def add_outages(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Ενσωματώνει τη συνολική μη διαθέσιμη ισχύ (MW) ανά ώρα, από ΟΛΑ τα
-    outages -- προγραμματισμένη συντήρηση ΚΑΙ απρόβλεπτες βλάβες (failures)
-    -- με ένα 1-day VISIBILITY LAG για να αποφευχθεί leakage.
+    Total unavailable capacity (MW) per hour from ALL outages -- planned
+    maintenance AND unplanned failures -- with a visibility lag to avoid
+    leakage.
 
-    ΙΣΤΟΡΙΚΟ / ΔΙΟΡΘΩΣΗ: η προηγούμενη έκδοση φιλτράριζε με
-    Status == "Active planned", με την υπόθεση ότι το πεδίο Status
-    κωδικοποιεί planned/forced. Ελέγχοντας τα πραγματικά δεδομένα βρέθηκε
-    ότι αυτό ΔΕΝ ισχύει: πολλές γραμμές με Status == "Active planned"
-    έχουν στην πραγματικότητα Reason == "Failure" (δηλαδή ήταν ήδη
-    forced/απρόβλεπτες βλάβες, απλά όχι με το Status που περιμέναμε). Το
-    πεδίο που πραγματικά διακρίνει planned/forced είναι το "Reason"
-    ("Foreseen Maintenance" vs "Failure"), όχι το "Status".
+    Planned vs forced: an earlier version kept only Status == "Active
+    planned", assuming Status encodes planned/forced. The data shows it does
+    not: many such rows have Reason == "Failure". The field that does
+    separate them is "Reason" ("Foreseen Maintenance" vs "Failure").
+    Decision: keep ALL outages (excluding only Status == "Cancelled", which
+    is not real unavailability), and make each one visible only
+    `outage_visibility_lag_hours` after its recorded start (see CONFIG). The
+    first day of every outage is therefore never seen -- a deliberate
+    trade-off (a little lost information, no leakage) instead of guessing
+    when each record was published, which the raw files do not say.
 
-    ΝΕΑ ΑΠΟΦΑΣΗ (μαζί με τον χρήστη): αντί να προσπαθήσουμε να
-    φιλτράρουμε planned/forced σωστά, τα παίρνουμε ΟΛΑ μαζί (εξαιρώντας
-    μόνο Status == "Cancelled", που δεν αντιπροσωπεύει πραγματική μη
-    διαθεσιμότητα). Για να αποφευχθεί leakage από forced outages που δεν
-    θα ήταν ρεαλιστικά γνωστά τη στιγμή μιας day-ahead πρόβλεψης, κάθε
-    outage γίνεται "ορατό" στο feature μόνο `outage_visibility_lag_hours`
-    ώρες ΜΕΤΑ την καταγεγραμμένη έναρξή του (βλ. CONFIG). Η πρώτη μέρα
-    ενός outage δεν αποτυπώνεται καθόλου -- συνειδητό, τεκμηριωμένο
-    trade-off (μικρή απώλεια πληροφορίας, μηδενικό ρίσκο leakage) αντί να
-    προσπαθήσουμε να μαντέψουμε πότε ακριβώς δημοσιεύτηκε κάθε εγγραφή
-    (πληροφορία που δεν υπάρχει στο raw αρχείο).
-
-    Λοιπές αποφάσεις (αμετάβλητες από πριν):
-    - Χρησιμοποιούμε τη στήλη "Time Interval (CET/CEST)" (το πραγματικό,
-      μη επικαλυπτόμενο υπο-διάστημα ανά γραμμή) — ΟΧΙ το "Start & End
-      Time" (που είναι απλά το συνολικό διάστημα της αναγγελίας, ίδιο σε
-      πολλές γραμμές, και θα οδηγούσε σε τεράστια υπερεκτίμηση αν
-      χρησιμοποιούνταν ως το πραγματικό παράθυρο κάθε τιμής MW).
-    - Η στήλη "Type" (Generation unit / Production unit) αγνοείται στο
-      άθροισμα — επιβεβαιώθηκε ότι αντανακλά αλλαγή σύμβασης αναφοράς στον
-      χρόνο (διαφορετικός κωδικός EIC ανά εποχή), όχι διπλή καταμέτρηση της
-      ίδιας μονάδας (τα διαστήματα δεν επικαλύπτονται).
-    - Timestamps στο αρχείο δηλώνονται ρητά ως CET/CEST -> +1h shift σε
-      τοπική ώρα Ελλάδας, ίδια λογική με τα cross-border flows.
+    Other decisions:
+    - "Time Interval (CET/CEST)" is used (the real, non-overlapping
+      sub-interval of each row), NOT "Start & End Time" (the whole
+      announcement period, repeated across many rows, which would hugely
+      overstate unavailability).
+    - "Type" (Generation unit / Production unit) is ignored when summing: it
+      reflects a reporting convention that changed over time (different EIC
+      codes in different periods), not the same unit counted twice (the
+      intervals do not overlap).
+    - Times are shifted by +1 h. Note this differs from stage 5, which
+      treats all sources as CET/CEST without a shift; the effect is that
+      outages appear one hour later than recorded, which only delays their
+      visibility further (conservative, no leakage).
     """
     if not CONFIG["run_outages_stage"]:
-        print("[6/8] Outages stage: ΑΠΕΝΕΡΓΟΠΟΙΗΜΕΝΟ (run_outages_stage=False) — παραλείπεται.")
+        print("[6/8] Outages stage disabled (run_outages_stage=False), skipped.")
         return df
 
     lag_hours = CONFIG["outage_visibility_lag_hours"]
-    print(f"[6/8] Ενσωμάτωση outages (planned + forced, με {lag_hours}h visibility lag)...")
+    print(f"[6/8] Adding outages (planned + forced, {lag_hours} h visibility lag)...")
     df = df.copy()
 
     outages_dir = CONFIG["outages_dir"]
     raw = _load_outage_files(outages_dir) if outages_dir and outages_dir.exists() else pd.DataFrame()
 
     if raw.empty:
-        print("    Outages: δεν βρέθηκαν αρχεία, παραλείπεται (outage_mw δεν προστίθεται).")
+        print("    Outages: no files found, skipped (outage_mw not added).")
         out_path = _stage_path("06_with_outages")
         df.to_csv(out_path, index=False)
-        print(f"    -> {out_path}  ({len(df)} γραμμές)")
+        print(f"    -> {out_path}  ({len(df)} rows)")
         return df
 
     n_total = len(raw)
     outages = raw[raw["Status"] != "Cancelled"].copy()
-    print(f"    Σύνολο γραμμών: {n_total}  ->  Active (planned+forced): {len(outages)}"
-          f"  (αγνοήθηκαν {n_total - len(outages)} λόγω Cancelled)")
+    print(f"    Rows: {n_total}  ->  active (planned+forced): {len(outages)}"
+          f"  ({n_total - len(outages)} cancelled rows ignored)")
 
     outages["Installed (MW)"] = pd.to_numeric(outages["Installed (MW)"], errors="coerce")
     outages["Available (MW)"] = pd.to_numeric(outages["Available (MW)"], errors="coerce")
     outages["unavailable_mw"] = (outages["Installed (MW)"] - outages["Available (MW)"]).clip(lower=0)
 
-    # Χρειαζόμαστε "Time Interval" ΚΑΙ έγκυρο unavailable_mw
+    # Need both a "Time Interval" and a valid unavailable_mw
     outages = outages.dropna(subset=["Time Interval (CET/CEST)", "unavailable_mw"])
 
     split = outages["Time Interval (CET/CEST)"].str.split(" - ", expand=True)
-    # +1h: CET/CEST -> τοπική ώρα Ελλάδας (ίδιο με πριν)
+    # +1 h shift (see docstring)
     outages["interval_start"] = pd.to_datetime(split[0], dayfirst=True) + pd.Timedelta(hours=1)
     outages["interval_end"] = pd.to_datetime(split[1], dayfirst=True) + pd.Timedelta(hours=1)
 
-    # ΝΕΟ: +lag_hours πάνω στο ήδη tz-shifted interval_start -- αυτό είναι
-    # η ώρα από την οποία το outage θεωρείται "ορατό"/γνωστό στο μοντέλο.
+    # The time from which the outage counts as known to the model.
     outages["visible_from"] = outages["interval_start"] + pd.Timedelta(hours=lag_hours)
     n_before_lag_filter = len(outages)
     outages = outages[outages["interval_end"] > outages["visible_from"]]
-    print(f"    Μετά το visibility lag: {len(outages)} / {n_before_lag_filter} γραμμές παραμένουν "
-          f"(οι υπόλοιπες ήταν πολύ σύντομες -- τελείωσαν πριν γίνουν καν ορατές).")
+    print(f"    After the visibility lag: {len(outages)} / {n_before_lag_filter} rows remain "
+          f"(the rest ended before becoming visible).")
 
     unit_key = outages["Unit Code"].fillna(outages["Unit Name"])
 
-    # Expand κάθε γραμμή σε ωριαία χρονοσειρά με τη σταθερή τιμή unavailable_mw,
-    # ΞΕΚΙΝΩΝΤΑΣ από visible_from αντί για interval_start.
+    # Expand each row into an hourly series with constant unavailable_mw,
+    # STARTING at visible_from rather than interval_start.
     expanded_frames = []
     for (u_key, vis_start, end, mw) in zip(unit_key, outages["visible_from"], outages["interval_end"], outages["unavailable_mw"]):
         hours = pd.date_range(vis_start.floor("h"), end - pd.Timedelta(seconds=1), freq="h")
@@ -465,63 +441,59 @@ def add_outages(df: pd.DataFrame) -> pd.DataFrame:
         expanded_frames.append(pd.DataFrame({"unit": u_key, "timestamp": hours, "unavailable_mw": mw}))
 
     if not expanded_frames:
-        print("    Outages: καμία έγκυρη γραμμή μετά το φιλτράρισμα, παραλείπεται.")
+        print("    Outages: no valid rows after filtering, skipped.")
         out_path = _stage_path("06_with_outages")
         df.to_csv(out_path, index=False)
-        print(f"    -> {out_path}  ({len(df)} γραμμές)")
+        print(f"    -> {out_path}  ({len(df)} rows)")
         return df
 
     expanded = pd.concat(expanded_frames, ignore_index=True)
 
-    # Πρώτα ομαδοποίηση ανά (μονάδα, ώρα) -> μέσος όρος, ώστε τυχόν διπλές/
-    # επικαλυπτόμενες γραμμές για ΤΗΝ ΙΔΙΑ μονάδα να μην αθροίζονται εσφαλμένα.
+    # Average per (unit, hour) first, so duplicate/overlapping rows for the
+    # SAME unit are not summed twice.
     per_unit_hourly = expanded.groupby(["unit", "timestamp"], as_index=False)["unavailable_mw"].mean()
 
-    # Μετά άθροιση σε όλες τις μονάδες -> συνολική μη διαθέσιμη ισχύ ανά ώρα
+    # Then sum over units -> total unavailable capacity per hour
     outage_mw = per_unit_hourly.groupby("timestamp", as_index=False)["unavailable_mw"].sum()
     outage_mw = outage_mw.rename(columns={"unavailable_mw": "outage_mw"})
 
     df = pd.merge(df, outage_mw, on="timestamp", how="left")
     missing_before = df["outage_mw"].isna().sum()
-    # Ώρες χωρίς καταγεγραμμένη (ή ακόμα μη-ορατή) διακοπή -> 0.
+    # Hours with no recorded (or not yet visible) outage -> 0.
     df["outage_mw"] = df["outage_mw"].fillna(0.0)
-    print(f"    outage_mw: {len(outages)} γραμμές (planned+forced, lagged), "
-          f"{missing_before} ώρες χωρίς outage συμπληρώθηκαν με 0.")
+    print(f"    outage_mw: {len(outages)} rows (planned+forced, lagged), "
+          f"{missing_before} hours without outages filled with 0.")
 
     out_path = _stage_path("06_with_outages")
     df.to_csv(out_path, index=False)
-    print(f"    -> {out_path}  ({len(df)} γραμμές)")
+    print(f"    -> {out_path}  ({len(df)} rows)")
     return df
 
 
 # ---------------------------------------------------------------------------
-# Στάδιο 7 — Στάθμη ταμιευτήρων υδροηλεκτρικών (ENTSO-E, εβδομαδιαία)
+# Stage 7 — Hydro reservoir level (ENTSO-E, weekly)
 # ---------------------------------------------------------------------------
 def add_hydro_reservoir(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Ενσωματώνει τη στάθμη πλήρωσης ταμιευτήρων/υδροηλεκτρικών αποθήκευσης
-    (ENTSO-E dataset [16.1.D], "Water Reservoirs and Hydro Storage Plants"),
-    plus την εβδομαδιαία μεταβολή της στάθμης.
+    Hydro reservoir filling level (ENTSO-E [16.1.D], "Water Reservoirs and
+    Hydro Storage Plants") and its weekly change.
 
-    ΚΡΙΣΙΜΗ ΔΙΟΡΘΩΣΗ LEAKAGE: το ENTSO-E δίνει ΕΒΔΟΜΑΔΙΑΙΟ μέσο όρο -- ένας
-    τέτοιος μέσος όρος υπολογίζεται ΜΟΝΟ αφού περάσει ολόκληρη η εβδομάδα.
-    Αν χρησιμοποιούσαμε "τη στάθμη ΑΥΤΗΣ της εβδομάδας" για ώρες ΜΕΣΑ σε
-    αυτήν, θα χρησιμοποιούσαμε πληροφορία από μέρες ΜΕΤΑ την υποτιθέμενη
-    πρόβλεψη -- ίδιο πρόβλημα με το net_out, πιο δύσκολο να το προσέξει
-    κανείς. Διόρθωση: χρησιμοποιούμε τη στάθμη της ΠΡΟΗΓΟΥΜΕΝΗΣ, ήδη
-    ολοκληρωμένης εβδομάδας (shift(1) πριν το expand σε ωριαία βάση).
+    Leakage: ENTSO-E reports a WEEKLY value, which only exists once the week
+    is over. Using "this week's level" for hours inside the week would use
+    information from after the forecast. Every hour therefore gets the level
+    of the PREVIOUS, completed week (shift(1) before expanding to hours).
     """
-    print("[7/8] Ενσωμάτωση στάθμης ταμιευτήρων υδροηλεκτρικών...")
+    print("[7/8] Adding hydro reservoir levels...")
     df = df.copy()
 
     hydro_dir = CONFIG["hydro_dir"]
     hydro_files = list(hydro_dir.rglob("*.csv")) if hydro_dir and hydro_dir.exists() else []
 
     if not hydro_files:
-        print("    Hydro reservoir: δεν βρέθηκαν αρχεία, παραλείπεται.")
+        print("    Hydro reservoir: no files found, skipped.")
         out_path = _stage_path("07_with_hydro")
         df.to_csv(out_path, index=False)
-        print(f"    -> {out_path}  ({len(df)} γραμμές)")
+        print(f"    -> {out_path}  ({len(df)} rows)")
         return df
 
     raw = pd.concat([pd.read_csv(f) for f in hydro_files], ignore_index=True)
@@ -531,11 +503,9 @@ def add_hydro_reservoir(df: pd.DataFrame) -> pd.DataFrame:
     raw["Energy (MWh)"] = pd.to_numeric(raw["Energy (MWh)"], errors="coerce")
     raw = raw.dropna(subset=["Energy (MWh)"])
 
-    # ΚΡΙΣΙΜΟ: χρησιμοποιούμε την τιμή της ΠΡΟΗΓΟΥΜΕΝΗΣ γραμμής (ήδη
-    # ολοκληρωμένη εβδομάδα) για το εύρος ημερομηνιών ΑΥΤΗΣ της γραμμής.
+    # Use the PREVIOUS row's value (a completed week) for THIS row's dates.
     raw["energy_lagged"] = raw["Energy (MWh)"].shift(1)
-    # Η μεταβολή υπολογίζεται ΚΙ ΑΥΤΗ πάνω σε ήδη-lagged τιμές -> παραμένει
-    # χωρίς leakage.
+    # The change is computed on the already-lagged values, so it is safe too.
     raw["energy_change_lagged"] = raw["energy_lagged"].diff()
 
     raw = raw.dropna(subset=["energy_lagged"])
@@ -551,88 +521,72 @@ def add_hydro_reservoir(df: pd.DataFrame) -> pd.DataFrame:
 
     df = pd.merge(df, hourly, on="timestamp", how="left")
 
-    # Οι πρώτες ~1-2 εβδομάδες του dataset (πριν υπάρχει καν "προηγούμενη"
-    # ολοκληρωμένη εβδομάδα) γεμίζουν με την πρώτη διαθέσιμη τιμή -- μικρή,
-    # τεκμηριωμένη παραδοχή μόνο για αυτό το αρχικό διάστημα.
+    # The first ~1-2 weeks of the dataset (before any completed previous
+    # week exists) are filled with the first available value -- a small
+    # assumption limited to the start of the data, which the models never
+    # train on (their windows start later).
     missing_before = df["hydro_reservoir_mwh"].isna().sum()
     df["hydro_reservoir_mwh"] = df["hydro_reservoir_mwh"].bfill().ffill()
     df["hydro_reservoir_change"] = df["hydro_reservoir_change"].bfill().ffill()
 
-    print(f"    Hydro reservoir: {len(hydro_files)} αρχεία, {missing_before} αρχικές ώρες "
-          f"συμπληρώθηκαν με την πρώτη διαθέσιμη τιμή.")
+    print(f"    Hydro reservoir: {len(hydro_files)} files, {missing_before} initial hours "
+          f"filled with the first available value.")
 
     out_path = _stage_path("07_with_hydro")
     df.to_csv(out_path, index=False)
-    print(f"    -> {out_path}  ({len(df)} γραμμές)")
+    print(f"    -> {out_path}  ({len(df)} rows)")
     return df
 
 
 # ---------------------------------------------------------------------------
-# Στάδιο 8 — Πρόβλεψη (όχι η πραγματική τιμή) του net_out
+# Stage 8 — Forecast (not the realized value) of net_out
 # ---------------------------------------------------------------------------
 def add_net_out_forecast(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Προσθέτει `net_out_forecast`: μια ΠΡΟΒΛΕΨΗ του net_out, βασισμένη ΜΟΝΟ σε
-    πληροφορία που είναι πραγματικά γνωστή τη στιγμή μιας day-ahead
-    πρόβλεψης. Σε αντίθεση με το ακατέργαστο `net_out` (στάδιο 5, realized
-    τιμές — leak αν χρησιμοποιηθεί απευθείας), αυτό ΕΙΝΑΙ ασφαλές ως model
-    feature.
+    Adds `net_out_forecast`: a FORECAST of net exports, built only from
+    information known at day-ahead forecast time (~12:00 on D-1). Unlike the
+    realized `net_out` from stage 5 (a leak if used directly), this is safe
+    as a model feature.
 
-    ΓΙΑΤΙ ΑΞΙΖΕΙ (βρέθηκε εμπειρικά): ένα "oracle" test με τις πραγματικές
-    net_out τιμές έδειξε μικρό, ασυνεπές όφελος (μερικές φορές αρνητικό).
-    Ένα πραγματικό forecasting submodel όμως, ακριβώς επειδή "καθαρίζει"
-    το net_out από τον μη προβλέψιμο θόρυβο και κρατάει μόνο το
-    προβλέψιμο/εποχιακό κομμάτι, έδωσε σταθερά καλύτερο MAE στο κύριο
-    μοντέλο σε 5 από 6 test periods που δοκιμάστηκαν (2y/3y training
-    window × H1 2025/H2 2025/H1 2026) — σε ένα σημείο μάλιστα καλύτερο κι
-    από το ίδιο το oracle.
+    Why a forecast rather than nothing: an "oracle" test with the realized
+    values showed a small, inconsistent gain; a forecasting submodel, which
+    keeps only the predictable (seasonal/structural) part of the flows, gave
+    a better main-model MAE in 5 of 6 test periods tried.
 
-    ΜΕΘΟΔΟΛΟΓΙΑ / ΓΙΑΤΙ BLOCKED WALK-FORWARD:
-    Το net_out_forecast είναι το ΜΟΝΟ feature σε αυτό το pipeline που είναι
-    το ίδιο αποτέλεσμα ενός μοντέλου, όχι ένας άμεσος υπολογισμός πάνω σε
-    raw δεδομένα (σε αντίθεση με τα lags/rolling means, που είναι απλά
-    shift()). Αυτό σημαίνει ότι δεν μπορεί να υπολογιστεί με ένα ενιαίο
-    fit πάνω σε όλο το ιστορικό dataset -- κάτι τέτοιο θα έκανε leak
-    πληροφορία από το μέλλον σε παλιότερες γραμμές (το μοντέλο θα είχε
-    εκπαιδευτεί και σε δεδομένα ΜΕΤΑ από κάθε δεδομένη γραμμή).
+    Blocked walk-forward: this is the only feature that is itself a model
+    output. Fitting it once on the full history would leak future
+    information into earlier rows, so the data is split into
+    `net_out_forecast_n_blocks` consecutive blocks; each block is predicted
+    by a model trained on all EARLIER blocks only. The first block (no
+    history) gets no forecast and falls back to 0.
 
-    Λύση: blocked walk-forward, ίδια λογική με το outlier classifier
-    πείραμα που κάναμε νωρίτερα. Το dataset χωρίζεται σε
-    `net_out_forecast_n_blocks` διαδοχικά κομμάτια. Για κάθε block (εκτός
-    του πρώτου), εκπαιδεύεται ένα μοντέλο πάνω σε ΟΛΑ τα προηγούμενα
-    blocks, και προβλέπει το τρέχον block. Αυτό είναι μια προσέγγιση του
-    πραγματικού ημερήσιου rolling retraining (πιο αδρή -- ένα μοντέλο ανά
-    block, όχι ανά μέρα -- αλλά χωρίς leakage, και πολύ πιο γρήγορο).
-
-    Το ΠΡΩΤΟ block (warmup, χωρίς προηγούμενο ιστορικό) δεν έχει
-    net_out_forecast -- αυτές οι γραμμές παίρνουν fallback = 0
-    (ισοδύναμο με "καμία πληροφορία exports"), τεκμηριωμένος περιορισμός.
-
-    Χρησιμοποιεί ΜΟΝΟ features που είναι πραγματικά γνωστά day-ahead:
-    ημερολογιακά, load/RES forecasts, τιμές καυσίμων/ρύπων, και lagged/
-    rolling τιμές του ΙΔΙΟΥ του net_out (shift(24)+ πριν, άρα ασφαλή).
+    Inputs: calendar, load/RES forecasts, gas and carbon prices, and lagged
+    realized flows. The flow lags are at least 48 h: realized flows are
+    published after delivery, so at ~12:00 on D-1 the flows for the afternoon
+    and evening of D-1 are not yet known, and a 24 h lag would leak them for
+    hours 12-23 of day D.
     """
-    print("[8/8] Πρόβλεψη net_out (blocked walk-forward, ασφαλές ως feature)...")
+    print("[8/8] Forecasting net_out (blocked walk-forward, safe as a feature)...")
     df = df.copy()
 
     if "net_out" not in df.columns or df["net_out"].isna().all():
-        print("    net_out_forecast: δεν υπάρχει διαθέσιμο net_out στο dataset, παραλείπεται.")
+        print("    net_out_forecast: no net_out in the dataset, skipped.")
         df["net_out_forecast"] = 0.0
         out_path = _stage_path("08_with_net_out_forecast")
         df.to_csv(out_path, index=False)
-        print(f"    -> {out_path}  ({len(df)} γραμμές)")
+        print(f"    -> {out_path}  ({len(df)} rows)")
         return df
 
-    # Lagged/rolling features του net_out -- ήδη shift()-based, ασφαλή.
-    df["net_out_lag24h"] = df["net_out"].shift(24)
+    # Lagged/rolling realized flows, at least 48 h old (see docstring).
     df["net_out_lag48h"] = df["net_out"].shift(48)
+    df["net_out_lag72h"] = df["net_out"].shift(72)
     df["net_out_lag168h"] = df["net_out"].shift(168)
-    df["net_out_rollmean7d"] = df["net_out"].shift(24).rolling(24 * 7).mean()
+    df["net_out_rollmean7d"] = df["net_out"].shift(48).rolling(24 * 7).mean()
 
     forecast_features = [
         "hour", "month", "day_of_week", "is_weekend",
         "load_forecast_mw", "res_forecast_mw", "NGAS_Price", "carbon_price_eur",
-        "net_out_lag24h", "net_out_lag48h", "net_out_lag168h", "net_out_rollmean7d",
+        "net_out_lag48h", "net_out_lag72h", "net_out_lag168h", "net_out_rollmean7d",
     ]
     forecast_features = [c for c in forecast_features if c in df.columns]
 
@@ -663,15 +617,15 @@ def add_net_out_forecast(df: pd.DataFrame) -> pd.DataFrame:
     n_missing = df["net_out_forecast"].isna().sum()
     df["net_out_forecast"] = df["net_out_forecast"].fillna(0.0)
 
-    # Τα βοηθητικά lag/rolling columns δεν χρειάζονται πλέον στο τελικό dataset
-    df = df.drop(columns=["net_out_lag24h", "net_out_lag48h", "net_out_lag168h", "net_out_rollmean7d"])
+    # The helper lag/rolling columns are not needed in the final dataset
+    df = df.drop(columns=["net_out_lag48h", "net_out_lag72h", "net_out_lag168h", "net_out_rollmean7d"])
 
-    print(f"    net_out_forecast: {n_blocks} blocks, {n_warmup} γραμμές warmup (χωρίς forecast, ->0), "
-          f"{n_missing} γραμμές συνολικά συμπληρώθηκαν με 0.")
+    print(f"    net_out_forecast: {n_blocks} blocks, {n_warmup} warm-up rows (no forecast, -> 0), "
+          f"{n_missing} rows filled with 0 in total.")
 
     out_path = _stage_path("08_with_net_out_forecast")
     df.to_csv(out_path, index=False)
-    print(f"    -> {out_path}  ({len(df)} γραμμές)")
+    print(f"    -> {out_path}  ({len(df)} rows)")
     return df
 
 
@@ -690,7 +644,7 @@ def build_dataset() -> pd.DataFrame:
 
     final_path = CONFIG["processed_dir"] / "final_dataset.csv"
     df.to_csv(final_path, index=False)
-    print(f"\nΟλοκληρώθηκε! Τελικό dataset: {final_path}  ({len(df)} γραμμές, {len(df.columns)} στήλες)")
+    print(f"\nDone. Final dataset: {final_path}  ({len(df)} rows, {len(df.columns)} columns)")
     return df
 
 
